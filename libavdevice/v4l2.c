@@ -81,6 +81,7 @@ struct video_data {
 
     int buffers;
     atomic_int buffers_queued;
+    atomic_int buffers_ignore;
     void **buf_start;
     unsigned int *buf_len;
     char *standard;
@@ -528,7 +529,10 @@ static int mmap_read_frame(AVFormatContext *ctx, AVPacket *pkt)
         av_log(ctx, AV_LOG_WARNING,
                "Dequeued v4l2 buffer contains corrupted data (%d bytes).\n",
                buf.bytesused);
-        buf.bytesused = 0;
+        // buf.bytesused = 0;
+	atomic_store(&s->buffers_ignore, 1);
+	enqueue_buffer(s, &buf);
+	return FFERROR_REDO;
     } else
 #endif
     {
@@ -542,7 +546,17 @@ static int mmap_read_frame(AVFormatContext *ctx, AVPacket *pkt)
                    "Dequeued v4l2 buffer contains %d bytes, but %d were expected. Flags: 0x%08X.\n",
                    buf.bytesused, s->frame_size, buf.flags);
             buf.bytesused = 0;
+	    atomic_store(&s->buffers_ignore, 1);
+	    enqueue_buffer(s, &buf);
+	    return FFERROR_REDO;
         }
+    }
+
+    if (s->buffers_ignore) {
+	av_log(ctx, AV_LOG_WARNING, "Ignoring dequeued v4l2 buffer due to earlier corruption.\n");
+	atomic_store(&s->buffers_ignore, s->buffers_ignore - 1);
+	enqueue_buffer(s, &buf);
+	return FFERROR_REDO;
     }
 
     /* Image is at s->buff_start[buf.index] */
@@ -616,6 +630,7 @@ static int mmap_start(AVFormatContext *ctx)
         }
     }
     atomic_store(&s->buffers_queued, s->buffers);
+    atomic_store(&s->buffers_ignore, 0);
 
     type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     if (v4l2_ioctl(s->fd, VIDIOC_STREAMON, &type) < 0) {
